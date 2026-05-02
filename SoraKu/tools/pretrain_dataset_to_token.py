@@ -24,7 +24,7 @@ def convert_datasets(input_file, val_percent=0.01, seed=42):
     return split_datasets
 
 
-def tokenize_and_format(tokenizer, examples):
+def tokenize_and_format(examples, tokenizer):
     """
     步骤 1: 将纯文本全部转换为 Token IDs。
     预训练不需要截断或填充。
@@ -68,7 +68,8 @@ def group_texts(examples, block_size=2048):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="数据集Token化")
+    parser = argparse.ArgumentParser(description="Pretrain 数据集 Token 化",
+                                     formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument("--tokenizer", required=True, help="分词器路径")
     parser.add_argument("--input", required=True, help="输入的多个 JSONL 文件路径")
     parser.add_argument("--output", required=True, help="最终输出的完整体 JSONL 文件路径")
@@ -81,7 +82,28 @@ if __name__ == "__main__":
     logger.info("加载分词器")
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, trust_remote_code=True, use_fast=True)
     
-    split_datasets = convert_datasets(args.inputs, args.val_percent, args.seed)
+    split_datasets = convert_datasets(args.input, args.val_percent, args.seed)
     
     logger.info("正在进行 Token 处理")
+    tokenized_datasets = split_datasets.map(
+        tokenize_and_format,
+        fn_kwargs={"tokenizer": tokenizer},
+        batched=True,
+        num_proc=args.workers,
+        remove_columns=split_datasets["train"].column_names
+    )
     
+    logger.info(f"正在进行序列拼接 (分块大小 = {args.block_size})")
+    packed_datasets = tokenized_datasets.map(
+        group_texts,
+        batched=True,
+        num_proc=args.workers,
+        desc=f"Grouping texts in chunks of {args.block_size}"
+    )
+    
+    logger.info(f"保存至二进制数据至: {args.output}")
+    packed_datasets.save_to_disk(args.output)
+    
+    logger.info("处理完毕！")
+    logger.info(f"训练块数量 (Train Blocks): {len(packed_datasets['train'])}")
+    logger.info(f"验证块数量 (Val Blocks): {len(packed_datasets['test'])}")
