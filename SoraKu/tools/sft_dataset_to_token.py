@@ -15,8 +15,12 @@ def ds_convert_hf(tokenizer, input_files):
     logger.info("读取并转换数据格式")
     formatted_data = []
     
+    # 语言字段映射
+    lang_keys = ["value", "value_zh", "value_jp", "value_kr", "value_gz", "value_ru"]
+    
     for file_path in input_files:
-        if not os.path.exits(file_path):
+        if not os.path.exists(file_path):
+            logger.warning(f"文件不存在，已跳过: {file_path}")
             continue
         
         logger.info(f"正在处理文件: {file_path}")
@@ -27,54 +31,21 @@ def ds_convert_hf(tokenizer, input_files):
                     continue
                 raw_item = json.loads(line)
                 
-                # 转换格式
-                messages_en = []
-                messages_zh = []
-                messages_jp = []
-                messages_kr = []
-                messages_gz = [] # gz 指代粤语
-                messages_ru = []
+                # 使用字典推导式为所有支持的语种初始化空的 message 列表
+                lang_messages = {key: [] for key in lang_keys}
                 
                 for msg in raw_item["conversations"]:
-                    role = "user" if msg["from"] == "hunman" else "assistant"
+                    role = "user" if msg["from"] == "human" else "assistant"
                     
-                    # 提取对话
-                    if "value" in msg:
-                        messages_en.append({"role": role, "content": msg["value"]})
-                        
-                    if "value_zh" in msg:
-                        messages_zh.append({"role": role, "content": msg["value_zh"]})
-                        
-                    if "value_jp" in msg:
-                        messages_jp.append({"role": role, "content": msg["value_jp"]})
-                        
-                    if "value_kr" in msg:
-                        messages_kr.append({"role": role, "content": msg["value_kr"]})
-                        
-                    if "value_gz" in msg:
-                        messages_gz.append({"role": role, "content": msg["value_gz"]})
-                        
-                    if "value_ru" in msg:
-                        messages_ru.append({"role": role, "content": msg["value_ru"]})
-                        
-                # 将数据级划分为独立数据，分别加入训练集
-                if messages_en:
-                    formatted_data.append({"messages": messages_en})
-                    
-                if messages_zh:
-                    formatted_data.append({"messages": messages_zh})
-                    
-                if messages_jp:
-                    formatted_data.append({"messages": messages_jp})
-                    
-                if messages_kr:
-                    formatted_data.append({"messages": messages_kr})
-                    
-                if messages_gz:
-                    formatted_data.append({"messages": messages_gz})
-                    
-                if messages_ru:
-                    formatted_data.append({"messages": messages_ru})
+                    # 遍历所有定义的语言字段，如果存在则将其加入对应的列表中
+                    for key in lang_keys:
+                        if key in msg and msg[key]: # 确保存在且不为空
+                            lang_messages[key].append({"role": role, "content": msg[key]})
+                
+                # 将收集到的各语种对话加入最终的训练数据列表中
+                for key in lang_keys:
+                    if lang_messages[key]:
+                        formatted_data.append({"messages": lang_messages[key]})
     
     # 转为 Hugging Face Dataset
     dataset = Dataset.from_list(formatted_data)
@@ -82,40 +53,41 @@ def ds_convert_hf(tokenizer, input_files):
     
     return dataset
             
-def tokenize_and_format(tokenizer, example):
+def tokenize_and_format(examples, tokenizer):
     """
     将对话套入 各个模型的 ChatML 对话模板，并转换 Token IDs。
     这里先将 labels 先复制为 input_ids
     """
     
     # 应用模板，并对句子进行 Token 化。
-    
     tokenized = tokenizer.apply_chat_template(
-        example["messages"],
-        tokenizer=True,
+        examples["messages"],
+        tokenize=True,
         add_generation_prompt=False, # 训练数据不需要生成引导符
-        return_dict=True
+        return_dict=True             # 返回包含 input_ids 等键的字典
     )
     
     # 复制一份 labels 作为 input_ids
-    tokenized["labels"] = tokenized["input_ids"].copy()
+    tokenized["labels"] = [ids.copy() for ids in tokenized["input_ids"]] 
     return tokenized
 
-
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="数据集Token化")
+    parser = argparse.ArgumentParser(description="SFT 数据集 Token 化",
+                                     formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument("--tokenizer", required=True, help="分词器路径")
     parser.add_argument("--inputs", nargs='+', required=True, help="输入的多个 JSONL 文件路径")
     parser.add_argument("--output", required=True, help="最终输出的完整体 JSONL 文件路径")
     parser.add_argument("--workers", type=int, default=8, help="并行使用的 CPU 核心数") 
     args = parser.parse_args()
     
-    logger.info("加载分词器")
+    logger.info("加载分词器中...")
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, trust_remote_code=True, use_fast=True)
+    logger.info("加载完毕！")
     
     dataset = ds_convert_hf(tokenizer, args.inputs)
     tokenized_dataset = dataset.map(
-        tokenize_and_format(tokenizer),
+        tokenize_and_format,
+        fn_kwargs={"tokenizer": tokenizer},
         batched=True,
         remove_columns=["messages"],
         num_proc=args.workers
@@ -126,7 +98,9 @@ if __name__ == "__main__":
     logger.info("SFT 数据集准备完毕！")
     
     # 检查处理后的数据长度
-    sample_ids = tokenized_dataset[0]["input_ids"]
-    logger.info(f"第一条数据 Token 长度: {len(sample_ids)}")
-    print(f"数据还原文本：\n{tokenizer.decode(sample_ids)}")
-
+    if len(tokenized_dataset) > 0:
+        sample_ids = tokenized_dataset[0]["input_ids"]
+        logger.info(f"第一条数据 Token 长度: {len(sample_ids)}")
+        print(f"数据还原文本：\n{tokenizer.decode(sample_ids)}")
+    else:
+        logger.warning("转换后的数据集为空，请检查输入文件格式。")
